@@ -6,13 +6,12 @@
   快速验证 sEMG 数据的合理性，决定是否继续后续测试。
 
 使用方式：
-  python pretest_pipeline.py                    # 处理所有受试者的预测试
-  python pretest_pipeline.py 03zhangyining       # 只处理指定受试者
+  python pretest_pipeline.py                    # 自动检测最新受试者
+  python pretest_pipeline.py 03zhangyining       # 指定受试者
 
 输出路径（独立于主流程）：
-  pretest_results/<受试者>/
-      ├── 预测试验证报告.xlsx       — MVC 值 + %MVC 统计数据
-      └── 预测试验证图表.png        — 信号概览 + %MVC 柱状图
+  pretest_results/
+      └── <受试者>_预测试验证.png  — MVC 值 + %MVC + 信号预览
 """
 
 import numpy as np
@@ -20,8 +19,6 @@ import os
 import csv
 import sys
 from scipy.signal import butter, filtfilt, iirnotch
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -31,9 +28,10 @@ matplotlib.rcParams['axes.unicode_minus'] = False
 
 # ========== 常量 ==========
 
-DATA_RAW_ROOT = r"e:\Coding_projects\SEMG_ANSYS\data_raw"
-PROCESSED_ROOT = r"e:\Coding_projects\SEMG_ANSYS\data_processed"
-PRETEST_RESULTS_ROOT = r"e:\Coding_projects\SEMG_ANSYS\pretest_results"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_RAW_ROOT = os.path.join(BASE_DIR, "data_raw")
+PROCESSED_ROOT = os.path.join(BASE_DIR, "data_processed")
+PRETEST_RESULTS_ROOT = os.path.join(BASE_DIR, "pretest_results")
 
 FS = 1000                    # 采样率 (Hz)
 T_START = 10.0               # %MVC 分析起始时间 (秒)
@@ -236,152 +234,27 @@ def preprocess_pretest_files(subject_dir):
     return found_mvc, found_decor
 
 
-# ========== 生成验证报告 ==========
-
-def generate_report(subject_dir, mvc_file, decor_file):
-    """生成 MVC 值和 %MVC 统计的 Excel 报告"""
-    print(f"\n  生成验证报告...")
-    report_dir = os.path.join(PRETEST_RESULTS_ROOT, subject_dir)
-    os.makedirs(report_dir, exist_ok=True)
-    report_path = os.path.join(report_dir, "预测试验证报告.xlsx")
-
-    wb = Workbook()
-
-    # --- Sheet 1: MVC 值 ---
-    ws_mvc = wb.active
-    ws_mvc.title = "MVC 值"
-
-    header_font = Font(bold=True, size=11)
-    header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-    thin_border = Border(
-        left=Side(style='thin'), right=Side(style='thin'),
-        top=Side(style='thin'), bottom=Side(style='thin'),
-    )
-
-    # 读取 MVC 文件
-    mvc_header, mvc_data = read_csv_file(mvc_file)
-    if mvc_header is None:
-        print("  错误：无法读取 MVC 预处理文件")
-        return None
-
-    mvc_values = {}
-    for col_name in CHANNEL_COLS:
-        col_idx = get_column_index(mvc_header, col_name)
-        if col_idx == -1:
-            mvc_values[col_name] = None
-            continue
-        signal = extract_column(mvc_data, col_idx)
-        mvc_val = extract_mvc_max(signal, fs=FS)
-        mvc_values[col_name] = mvc_val
-
-    mvc_headers = ["通道", "肌肉", "MVC_极大值"]
-    for col_idx, h in enumerate(mvc_headers, 1):
-        cell = ws_mvc.cell(row=1, column=col_idx, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal='center')
-        cell.border = thin_border
-
-    for r_idx, col_name in enumerate(CHANNEL_COLS, 2):
-        ws_mvc.cell(row=r_idx, column=1, value=col_name).border = thin_border
-        muscle_name = col_name.split("_", 1)[1]
-        ws_mvc.cell(row=r_idx, column=2, value=muscle_name).border = thin_border
-        val = mvc_values.get(col_name, None)
-        ws_mvc.cell(row=r_idx, column=3, value=round(val, 4) if val else "N/A").border = thin_border
-
-    # 数据合理性判断
-    ws_mvc.cell(row=7, column=1, value="数据合理性检查：").font = Font(bold=True, color="CC0000")
-    ws_mvc.cell(row=8, column=1, value="MVC 值过低（<10）可能表示信号异常")
-    ws_mvc.cell(row=9, column=1, value="MVC 值过高（>1000）可能表示噪声干扰")
-    for r_idx, col_name in enumerate(CHANNEL_COLS, 2):
-        val = mvc_values.get(col_name, None)
-        if val is not None:
-            status = "✅ 正常" if 10 <= val <= 1000 else "⚠️ 异常"
-            ws_mvc.cell(row=r_idx, column=4, value=status).border = thin_border
-
-    for col in range(1, 5):
-        ws_mvc.column_dimensions[chr(64 + col)].width = 22
-
-    # --- Sheet 2: %MVC 统计 ---
-    ws_pct = wb.create_sheet(title="%MVC 统计")
-    decor_name = os.path.basename(decor_file) if decor_file else "装饰任务"
-
-    pct_headers = ["通道", "肌肉", "Mean_%MVC", "APDF_10%", "APDF_50%", "APDF_90%"]
-    for col_idx, h in enumerate(pct_headers, 1):
-        cell = ws_pct.cell(row=1, column=col_idx, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal='center')
-        cell.border = thin_border
-
-    ws_pct.cell(row=1, column=7, value=f"任务: {decor_name}")
-    ws_pct.cell(row=1, column=7).font = Font(bold=True, color="333399")
-
-    if decor_file and mvc_values:
-        decor_header, decor_data = read_csv_file(decor_file)
-        if decor_header:
-            for r_idx, col_name in enumerate(CHANNEL_COLS, 2):
-                mvc_val = mvc_values.get(col_name, None)
-                if mvc_val is None or mvc_val <= 0:
-                    continue
-
-                col_idx = get_column_index(decor_header, col_name)
-                if col_idx == -1:
-                    continue
-                signal = extract_column(decor_data, col_idx)
-
-                # 截取分析区间
-                start_idx = int(T_START * FS)
-                end_idx = int(T_END * FS)
-                if end_idx > len(signal):
-                    end_idx = len(signal)
-                signal_seg = signal[start_idx:end_idx]
-
-                if len(signal_seg) < WINDOW_SIZE:
-                    continue
-
-                rms_seq = sliding_rms(signal_seg, WINDOW_SIZE)
-                mean_val, p10, p50, p90 = compute_percent_mvc_stats(rms_seq, mvc_val)
-
-                muscle_name = col_name.split("_", 1)[1]
-                ws_pct.cell(row=r_idx, column=1, value=col_name).border = thin_border
-                ws_pct.cell(row=r_idx, column=2, value=muscle_name).border = thin_border
-                ws_pct.cell(row=r_idx, column=3, value=round(mean_val, 4)).border = thin_border
-                ws_pct.cell(row=r_idx, column=4, value=round(p10, 4)).border = thin_border
-                ws_pct.cell(row=r_idx, column=5, value=round(p50, 4)).border = thin_border
-                ws_pct.cell(row=r_idx, column=6, value=round(p90, 4)).border = thin_border
-
-                # 合理性检查
-                status = "✅ 合理" if mean_val < 80 else "⚠️ %MVC偏高，检查MVC值"
-                ws_pct.cell(row=r_idx, column=7, value=status).border = thin_border
-
-        for col in range(1, 8):
-            ws_pct.column_dimensions[chr(64 + col)].width = 20
-
-    wb.save(report_path)
-    print(f"  ✅ 报告已保存: {report_path}")
-    return report_path
-
-
 # ========== 生成验证图表 ==========
 
-def generate_chart(subject_dir, mvc_file, decor_file, report_path):
-    """生成预测试验证图表"""
+def generate_chart(subject_dir, mvc_file, decor_file):
+    """生成预测试验证图表（包含 MVC 值、%MVC 统计、信号预览、合理性检查）"""
     print(f"  生成验证图表...")
 
-    # 读取数据
     mvc_header, mvc_data = read_csv_file(mvc_file)
     decor_header, decor_data = read_csv_file(decor_file) if decor_file else (None, None)
 
     if mvc_header is None:
         print("  错误：无法读取数据，跳过图表")
-        return
+        return None
+
+    muscles_short = [c.split("_", 1)[1] for c in CHANNEL_COLS]
 
     # 提取 MVC 值
     mvc_values = {}
     for col_name in CHANNEL_COLS:
         col_idx = get_column_index(mvc_header, col_name)
         if col_idx == -1:
+            mvc_values[col_name] = None
             continue
         signal = extract_column(mvc_data, col_idx)
         mvc_val = extract_mvc_max(signal, fs=FS)
@@ -409,35 +282,31 @@ def generate_chart(subject_dir, mvc_file, decor_file, report_path):
             mean_val, p10, p50, p90 = compute_percent_mvc_stats(rms_seq, mvc_val)
             pct_stats[col_name] = {"Mean": mean_val, "P10": p10, "P50": p50, "P90": p90}
 
-    # 开始绘图
-    fig = plt.figure(figsize=(18, 10))
-    gs = fig.add_gridspec(2, 3, hspace=0.35, wspace=0.30)
+    # 开始绘图: 2x2 布局 + 底部信号预览
+    fig = plt.figure(figsize=(16, 12))
+    gs = fig.add_gridspec(3, 2, hspace=0.40, wspace=0.30,
+                          height_ratios=[1, 1, 0.8])
+
+    mvc_vals = [mvc_values.get(c, 0) or 0 for c in CHANNEL_COLS]
+    colors = [MUSCLE_COLORS[c] for c in CHANNEL_COLS]
 
     # ---- 图1: MVC 柱状图 ----
     ax1 = fig.add_subplot(gs[0, 0])
-    muscles_short = [c.split("_", 1)[1] for c in CHANNEL_COLS]
-    mvc_vals = [mvc_values.get(c, 0) for c in CHANNEL_COLS]
-    colors = [MUSCLE_COLORS[c] for c in CHANNEL_COLS]
     bars = ax1.bar(muscles_short, mvc_vals, color=colors, edgecolor='white', linewidth=0.5)
     for bar, val in zip(bars, mvc_vals):
         ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(mvc_vals)*0.02,
                  f'{val:.1f}', ha='center', va='bottom', fontsize=9)
-    ax1.set_title("预测试 - MVC 最大值", fontsize=14, fontweight='bold')
+    ax1.set_title("MVC 最大值", fontsize=14, fontweight='bold')
     ax1.set_ylabel("MVC (整流后 μV)")
     ax1.grid(axis='y', alpha=0.3)
     ax1.set_ylim(0, max(mvc_vals) * 1.25 if max(mvc_vals) > 0 else 100)
 
-    # ---- 图2: 装饰任务 %MVC 对比 ----
+    # ---- 图2: 装饰任务 %MVC ----
     ax2 = fig.add_subplot(gs[0, 1])
     if pct_stats:
         x = np.arange(len(CHANNEL_COLS))
-        bar_width = 0.5
         means = [pct_stats[c]["Mean"] for c in CHANNEL_COLS]
-        p10s = [pct_stats[c]["P10"] for c in CHANNEL_COLS]
-        p50s = [pct_stats[c]["P50"] for c in CHANNEL_COLS]
-        p90s = [pct_stats[c]["P90"] for c in CHANNEL_COLS]
-
-        bars_mean = ax2.bar(x, means, bar_width, color=colors, edgecolor='white', linewidth=0.5)
+        bars_mean = ax2.bar(x, means, 0.5, color=colors, edgecolor='white', linewidth=0.5)
         for bar, val in zip(bars_mean, means):
             ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(means)*0.02,
                      f'{val:.1f}%', ha='center', va='bottom', fontsize=8)
@@ -447,52 +316,129 @@ def generate_chart(subject_dir, mvc_file, decor_file, report_path):
         ax2.set_ylabel("%MVC")
         ax2.grid(axis='y', alpha=0.3)
         ax2.set_ylim(0, max(means) * 1.4 if max(means) > 0 else 20)
-
-        # 同时在右侧用表格显示 APDF 值
-        table_data = []
-        for i, c in enumerate(CHANNEL_COLS):
-            table_data.append([muscles_short[i], f'{p10s[i]:.1f}', f'{p50s[i]:.1f}', f'{p90s[i]:.1f}'])
-        col_labels = ['肌肉', 'P10', 'P50', 'P90']
-        table_ax = fig.add_subplot(gs[0, 2])
-        table_ax.axis('off')
-        table = table_ax.table(cellText=table_data, colLabels=col_labels,
-                               cellLoc='center', loc='center')
-        table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1, 1.8)
-        table_ax.set_title("APDF 百分位值 (%MVC)", fontsize=14, fontweight='bold', pad=20)
     else:
         ax2.text(0.5, 0.5, "无装饰任务数据", ha='center', va='center', fontsize=14)
         ax2.set_title("装饰任务 - Mean %MVC", fontsize=14, fontweight='bold')
 
-    # ---- 图3: 信号波形概览（装饰任务的前 5 秒预览） ----
-    ax3 = fig.add_subplot(gs[1, :])
+    # ---- 图3: 数据合理性检查（表格形式） ----
+    ax3 = fig.add_subplot(gs[1, 0])
+    ax3.axis('off')
+
+    table_data = []
+    has_anomaly = False
+    for i, col_name in enumerate(CHANNEL_COLS):
+        mvc_val = mvc_values.get(col_name, None)
+        if mvc_val is not None:
+            mvc_status = "正常" if 10 <= mvc_val <= 1000 else "⚠ 异常"
+            if not (10 <= mvc_val <= 1000):
+                has_anomaly = True
+        else:
+            mvc_status = "无数据"
+            has_anomaly = True
+
+        if col_name in pct_stats:
+            mean_val = pct_stats[col_name]["Mean"]
+            pct_status = "正常" if mean_val < 80 else "⚠ 偏高"
+            if mean_val >= 80:
+                has_anomaly = True
+        else:
+            mean_val = None
+            pct_status = "无数据"
+
+        table_data.append([
+            muscles_short[i],
+            f"{mvc_val:.1f}" if mvc_val else "N/A",
+            mvc_status,
+            f"{mean_val:.1f}%" if mean_val else "N/A",
+            pct_status,
+        ])
+
+    col_labels = ["肌肉", "MVC值", "MVC状态", "Mean%MVC", "%MVC状态"]
+    table = ax3.table(cellText=table_data, colLabels=col_labels,
+                      cellLoc='center', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.8)
+
+    for key, cell in table.get_celld().items():
+        if key[0] == 0:
+            cell.set_facecolor('#D9E1F2')
+            cell.set_text_props(fontweight='bold')
+        cell.set_edgecolor('#CCCCCC')
+
+    # 高亮异常行
+    for i, row_data in enumerate(table_data):
+        if "异常" in row_data[2] or "偏高" in row_data[4] or "无数据" in row_data[2]:
+            for j in range(5):
+                table[(i + 1, j)].set_facecolor('#FFF2CC')
+
+    ax3.set_title("数据合理性检查", fontsize=14, fontweight='bold', pad=15)
+
+    # 合理性检查说明
+    check_text = ("MVC 值过低(<10)：信号异常 | MVC 值过高(>1000)：噪声干扰\n"
+                  "Mean %MVC 偏高(≥80%)：检查 MVC 参考值")
+    ax3.text(0.5, -0.15, check_text, transform=ax3.transAxes,
+             fontsize=8, color='#CC0000', ha='center', va='top',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='#FFF5F5', edgecolor='#CC0000', alpha=0.8))
+
+    # ---- 图4: APDF 百分位值表格 ----
+    ax4 = fig.add_subplot(gs[1, 1])
+    ax4.axis('off')
+    if pct_stats:
+        apdf_data = []
+        for i, c in enumerate(CHANNEL_COLS):
+            if c in pct_stats:
+                apdf_data.append([
+                    muscles_short[i],
+                    f'{pct_stats[c]["P10"]:.1f}',
+                    f'{pct_stats[c]["P50"]:.1f}',
+                    f'{pct_stats[c]["P90"]:.1f}',
+                ])
+        apdf_labels = ["肌肉", "P10", "P50", "P90"]
+        apdf_table = ax4.table(cellText=apdf_data, colLabels=apdf_labels,
+                               cellLoc='center', loc='center')
+        apdf_table.auto_set_font_size(False)
+        apdf_table.set_fontsize(10)
+        apdf_table.scale(1, 2.0)
+        for key, cell in apdf_table.get_celld().items():
+            if key[0] == 0:
+                cell.set_facecolor('#D9E1F2')
+                cell.set_text_props(fontweight='bold')
+            cell.set_edgecolor('#CCCCCC')
+        ax4.set_title("APDF 百分位值 (%MVC)", fontsize=14, fontweight='bold', pad=15)
+    else:
+        ax4.text(0.5, 0.5, "无装饰任务数据", ha='center', va='center', fontsize=14)
+        ax4.set_title("APDF 百分位值 (%MVC)", fontsize=14, fontweight='bold')
+
+    # ---- 图5: 信号波形概览（底部占满一行） ----
+    ax5 = fig.add_subplot(gs[2, :])
     if decor_header and decor_data:
-        time_range = min(5000, len(decor_data))  # 取前 5 秒
+        time_range = min(5000, len(decor_data))
         t = np.arange(time_range) / FS
         for i, col_name in enumerate(CHANNEL_COLS):
             col_idx = get_column_index(decor_header, col_name)
             if col_idx == -1:
                 continue
             signal = extract_column(decor_data, col_idx)[:time_range]
-            offset = i * 200  # 上下偏移便于显示
-            ax3.plot(t, signal + offset, color=MUSCLE_COLORS[col_name],
+            offset = i * 200
+            ax5.plot(t, signal + offset, color=MUSCLE_COLORS[col_name],
                      label=col_name.split("_", 1)[1], linewidth=0.6)
-        ax3.set_xlabel("时间 (秒)")
-        ax3.set_ylabel("信号幅值 (偏移显示)")
-        ax3.set_title("装饰任务 - 预处理后信号预览（前 5 秒）", fontsize=14, fontweight='bold')
-        ax3.legend(fontsize=9, loc='upper right')
-        ax3.grid(alpha=0.3)
-        ax3.set_yticks([])  # 隐藏 y 轴刻度
+        ax5.set_xlabel("时间 (秒)")
+        ax5.set_ylabel("信号幅值 (偏移显示)")
+        ax5.set_title("装饰任务 - 预处理后信号预览（前 5 秒）", fontsize=14, fontweight='bold')
+        ax5.legend(fontsize=9, loc='upper right')
+        ax5.grid(alpha=0.3)
+        ax5.set_yticks([])
     else:
-        ax3.text(0.5, 0.5, "无装饰任务数据", ha='center', va='center', fontsize=14)
-        ax3.set_title("装饰任务 - 信号预览", fontsize=14, fontweight='bold')
+        ax5.text(0.5, 0.5, "无装饰任务数据", ha='center', va='center', fontsize=14)
+        ax5.set_title("装饰任务 - 信号预览", fontsize=14, fontweight='bold')
 
-    fig.suptitle(f"受试者: {subject_dir} — 预测试数据验证",
-                 fontsize=18, fontweight='bold', y=1.02)
-    plt.tight_layout()
+    # 整体标题
+    overall_status = "[!] 数据异常，请检查！" if has_anomaly else "[OK] 数据合理，可继续测试"
+    fig.suptitle(f"受试者: {subject_dir} — 预测试数据验证\n{overall_status}",
+                 fontsize=16, fontweight='bold', y=1.02, color='#CC0000' if has_anomaly else '#2E7D32')
 
-    chart_path = os.path.join(PRETEST_RESULTS_ROOT, subject_dir, "预测试验证图表.png")
+    chart_path = os.path.join(PRETEST_RESULTS_ROOT, f"{subject_dir}_预测试验证.png")
     plt.savefig(chart_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"  ✅ 图表已保存: {chart_path}")
@@ -502,7 +448,7 @@ def generate_chart(subject_dir, mvc_file, decor_file, report_path):
 
 # ========== 打印终端摘要 ==========
 
-def print_summary(subject_dir, mvc_values, pct_stats, chart_path, report_path):
+def print_summary(subject_dir, mvc_values, pct_stats, chart_path):
     """在终端打印预测试结果摘要"""
     print(f"\n{'='*60}")
     print(f"  受试者: {subject_dir} — 预测试验证结果")
@@ -532,11 +478,29 @@ def print_summary(subject_dir, mvc_values, pct_stats, chart_path, report_path):
                 print(f"  {muscle:<30} {mean_val:<12.4f} {status}")
 
     print(f"\n  📁 输出文件：")
-    if report_path:
-        print(f"     报告: {report_path}")
     if chart_path:
         print(f"     图表: {chart_path}")
     print(f"{'='*60}\n")
+
+
+# ========== 自动检测最新受试者 ==========
+
+def get_latest_subject():
+    """自动检测 data_raw/ 下最新修改的受试者目录"""
+    if not os.path.isdir(DATA_RAW_ROOT):
+        return None
+
+    subject_dirs = []
+    for d in os.listdir(DATA_RAW_ROOT):
+        full_path = os.path.join(DATA_RAW_ROOT, d)
+        if os.path.isdir(full_path):
+            subject_dirs.append((d, os.path.getmtime(full_path)))
+
+    if not subject_dirs:
+        return None
+
+    subject_dirs.sort(key=lambda x: x[1], reverse=True)
+    return subject_dirs[0][0]
 
 
 # ========== 主程序 ==========
@@ -558,8 +522,12 @@ def main():
             print(f"错误：未找到受试者目录 '{target_subject}'")
             sys.exit(1)
     else:
-        subject_dirs = sorted([d for d in os.listdir(DATA_RAW_ROOT)
-                               if os.path.isdir(os.path.join(DATA_RAW_ROOT, d))])
+        latest = get_latest_subject()
+        if latest is None:
+            print(f"错误：data_raw/ 下未找到任何受试者目录")
+            sys.exit(1)
+        print(f"\n  自动检测到最新受试者: {latest}")
+        subject_dirs = [latest]
 
     processed_any = False
 
@@ -616,12 +584,11 @@ def main():
                 mean_val, p10, p50, p90 = compute_percent_mvc_stats(rms_seq, mvc_val)
                 pct_stats[col_name] = {"Mean": mean_val, "P10": p10, "P50": p50, "P90": p90}
 
-        # 4. 生成报告和图表
-        report_path = generate_report(subject_dir, mvc_file, decor_file)
-        chart_path = generate_chart(subject_dir, mvc_file, decor_file, report_path)
+        # 4. 生成验证图表（含合理性检查）
+        chart_path = generate_chart(subject_dir, mvc_file, decor_file)
 
         # 5. 打印摘要
-        print_summary(subject_dir, mvc_values, pct_stats, chart_path, report_path)
+        print_summary(subject_dir, mvc_values, pct_stats, chart_path)
 
     if not processed_any:
         print(f"\n⚠ 没有处理任何预测试数据。")
@@ -630,8 +597,8 @@ def main():
         print(f"  2. 文件名需包含 '最大收缩' 和 '装饰' 关键字")
         print(f"  3. 运行: python pretest_pipeline.py")
     else:
-        print(f"\n✅ 预测试验证完成！请查看 pretest_results/ 目录下的报告和图表。")
-        print(f"   - 验证图表的 %MVC 值是否合理（一般 < 30% 为正常）")
+        print(f"\n✅ 预测试验证完成！请查看 pretest_results/ 目录下的验证图表。")
+        print(f"   - 图表中已包含数据合理性检查结果")
         print(f"   - 检查 MVC 值是否在合理范围内（10~1000）")
         print(f"   - 确认信号预览无明显噪声干扰")
         print(f"\n  数据合理 → 继续正式测试")
