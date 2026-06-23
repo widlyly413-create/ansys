@@ -36,13 +36,32 @@ def extract_mvc_max(rectified_mvc_signal, fs=1000, window_duration=1.0):
 
 
 def read_csv_file(filepath):
-    """读取 CSV 文件，返回 header 和数据行"""
-    with open(filepath, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        rows = list(reader)
-    if not rows:
+    """
+    读取 CSV 文件，返回 (header, data)
+      - header: 列名列表
+      - data: numpy 2D array (n_rows x n_cols)，不含表头行
+    使用 numpy.loadtxt 加速大文件读取。
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            header_line = f.readline()
+            if not header_line:
+                return None, None
+            header = header_line.strip().split(',')
+
+        # Windows 需显式指定 encoding='utf-8'，否则默认 gbk 解码失败
+        data = np.loadtxt(filepath, delimiter=',', skiprows=1,
+                          dtype=np.float64, encoding='utf-8')
+    except (UnicodeDecodeError, ValueError, OSError) as e:
+        print(f"    ⚠ 文件读取失败: {e}")
         return None, None
-    return rows[0], rows[1:]
+
+    if data.ndim == 0 or data.size == 0:
+        return None, None
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+
+    return header, data
 
 
 def get_column_index(header, col_name):
@@ -60,9 +79,16 @@ def load_existing_mvc(mvc_path):
     existing = set()
     if not os.path.exists(mvc_path):
         return existing
-    header, data_rows = read_csv_file(mvc_path)
-    if header is None:
+    try:
+        with open(mvc_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except (UnicodeDecodeError, OSError):
         return existing
+    if not rows:
+        return existing
+    header = rows[0]
+    data_rows = rows[1:]
     subj_idx = get_column_index(header, "受试者")
     chan_idx = get_column_index(header, "通道_肌肉")
     if subj_idx == -1 or chan_idx == -1:
@@ -120,9 +146,7 @@ def main():
                     print(f"    ⚠ {mvc_file} 缺少列 {col_name}，跳过")
                     continue
 
-                signal = np.array(
-                    [float(row[col_idx]) for row in data_rows], dtype=np.float64
-                )
+                signal = data_rows[:, col_idx]
                 try:
                     mvc_value = extract_mvc_max(signal, fs=1000, window_duration=1.0)
                 except ValueError as e:
