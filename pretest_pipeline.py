@@ -475,7 +475,7 @@ def generate_chart(subject_dir, mvc_file_list, decor_file):
                  fontsize=16, fontweight='bold', y=1.02, color='#CC0000' if has_anomaly else '#2E7D32')
 
     chart_path = os.path.join(PRETEST_RESULTS_ROOT, f"{subject_dir}_预测试验证.png")
-    plt.savefig(chart_path, dpi=200, bbox_inches='tight')
+    plt.savefig(chart_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  ✅ 图表已保存: {chart_path}")
 
