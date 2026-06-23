@@ -156,24 +156,45 @@ def compute_percent_mvc_stats(rms_seq, mvc_value):
 
 def preprocess_pretest_files(subject_dir):
     """
-    对指定受试者的预测试文件夹进行预处理。
+    对指定受试者的数据进行预处理（支持预测试子目录或根目录）。
+
+    流程：
+      1. 优先查找 data_raw/<subject>/预测试/ 目录
+      2. 若不存在，则直接从 data_raw/<subject>/ 根目录查找
+         （仅处理包含"最大收缩"或"装饰"的文件）
+
     返回: (mvc_files_processed, decor_file_processed)
         mvc_files_processed: 所有"最大收缩"文件的路径列表（可能多个）
         decor_file_processed: 装饰任务文件路径（一个），或 None
     """
+    # === 确定原始数据源目录 ===
     raw_pretest_path = os.path.join(DATA_RAW_ROOT, subject_dir, PRETEST_DIR)
+    use_root = False
     if not os.path.isdir(raw_pretest_path):
-        return None, None
+        # 回退到受试者根目录
+        raw_pretest_path = os.path.join(DATA_RAW_ROOT, subject_dir)
+        if not os.path.isdir(raw_pretest_path):
+            return None, None
+        use_root = True
+        print(f"  ℹ 未找到预测试子目录，直接使用 {subject_dir}/ 根目录文件")
 
-    out_pretest_path = os.path.join(PROCESSED_ROOT, subject_dir, PRETEST_DIR)
+    # === 确定输出目录 ===
+    if use_root:
+        out_pretest_path = os.path.join(PROCESSED_ROOT, subject_dir)
+    else:
+        out_pretest_path = os.path.join(PROCESSED_ROOT, subject_dir, PRETEST_DIR)
     os.makedirs(out_pretest_path, exist_ok=True)
 
     found_mvc_list = []  # 可能有多个最大收缩文件
     found_decor = None
 
-    for fname in os.listdir(raw_pretest_path):
+    for fname in sorted(os.listdir(raw_pretest_path)):
         fpath = os.path.join(raw_pretest_path, fname)
         if not os.path.isfile(fpath):
+            continue
+
+        # 从根目录读取时，只处理"最大收缩"或"装饰"文件
+        if use_root and "最大收缩" not in fname and "装饰" not in fname:
             continue
 
         out_path = os.path.join(out_pretest_path, fname)
@@ -554,13 +575,15 @@ def main():
         # 1. 预处理预测试文件
         mvc_files, decor_file = preprocess_pretest_files(subject_dir)
         if mvc_files is None or len(mvc_files) == 0:
-            print(f"  ⚠ 未找到预测试目录或最大收缩文件，跳过")
-            print(f"  请在 data_raw/{subject_dir}/预测试/ 下放置预测试文件")
+            print(f"  ⚠ 未找到最大收缩文件，跳过")
+            print(f"  请在 data_raw/{subject_dir}/ 下放置包含'最大收缩'关键字的文件")
+            print(f"  （或放在 data_raw/{subject_dir}/预测试/ 目录下）")
             continue
 
         if decor_file is None:
-            print(f"  ⚠ 未找到预测试装饰任务文件，跳过")
-            print(f"  请在 data_raw/{subject_dir}/预测试/ 下放置装饰实验文件")
+            print(f"  ⚠ 未找到装饰任务文件，跳过")
+            print(f"  请在 data_raw/{subject_dir}/ 下放置包含'装饰'关键字的文件")
+            print(f"  （或放在 data_raw/{subject_dir}/预测试/ 目录下）")
             continue
 
         processed_any = True
