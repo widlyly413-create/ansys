@@ -27,13 +27,45 @@ OUTPUT_EXCEL = r"e:\Coding_projects\SEMG_ANSYS\analysis_results.xlsx"
 
 # ========== 工具函数 ==========
 
-def read_csv_file(filepath):
-    with open(filepath, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        rows = list(reader)
+def read_csv_file_str(filepath):
+    """读取含字符串列的 CSV 文件（如 MVC_values.csv），返回 header 和数据行"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except (UnicodeDecodeError, OSError):
+        return None, None
     if not rows:
         return None, None
     return rows[0], rows[1:]
+
+
+def read_csv_file(filepath):
+    """
+    读取纯数值 CSV 文件，返回 (header, data)
+      - header: 列名列表
+      - data: numpy 2D array (n_rows x n_cols)
+    使用 numpy.loadtxt 加速大文件读取。
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            header_line = f.readline()
+            if not header_line:
+                return None, None
+            header = header_line.strip().split(',')
+
+        data = np.loadtxt(filepath, delimiter=',', skiprows=1,
+                          dtype=np.float64, encoding='utf-8')
+    except (UnicodeDecodeError, ValueError, OSError) as e:
+        print(f"    ⚠ 文件读取失败: {e}")
+        return None, None
+
+    if data.ndim == 0 or data.size == 0:
+        return None, None
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+
+    return header, data
 
 
 def get_column_index(header, col_name):
@@ -48,7 +80,7 @@ def load_mvc_values(mvc_path):
     读取 MVC_values.csv，返回字典:
         mvc_lookup[subject][channel_col] = mvc_value
     """
-    header, data_rows = read_csv_file(mvc_path)
+    header, data_rows = read_csv_file_str(mvc_path)
     if header is None:
         raise FileNotFoundError(f"无法读取 MVC 文件: {mvc_path}")
 
@@ -214,15 +246,13 @@ def main():
                     continue
                 mvc_val = subject_mvc[channel_col]
 
-                # 提取信号
+                # 提取信号（numpy 列切片，大幅加速）
                 col_idx = get_column_index(header_row, channel_col)
                 if col_idx == -1:
                     print(f"    文件缺少列: {channel_col}")
                     continue
 
-                signal = np.array(
-                    [float(r[col_idx]) for r in data_rows], dtype=np.float64
-                )
+                signal = data_rows[:, col_idx]
 
                 # 截取 10s–160s 时间范围
                 start_idx = int(T_START * FS)
