@@ -76,60 +76,48 @@ def main():
     processed_root = r"e:\Coding_projects\SEMG_ANSYS\data_processed"
     output_path = r"e:\Coding_projects\SEMG_ANSYS\MVC_values.csv"
 
-    # 加载已有 MVC 记录，用于增量判断
-    existing_records = load_existing_mvc(output_path)
-    new_results = []       # 本次新增的
-    all_results = []       # 最终合并的全部记录
-
-    # 先将已有记录读入 all_results
-    if os.path.exists(output_path):
-        header, data_rows = read_csv_file(output_path)
-        if header is not None:
-            subj_idx = get_column_index(header, "受试者")
-            file_idx = get_column_index(header, "动作文件")
-            chan_idx = get_column_index(header, "通道_肌肉")
-            val_idx  = get_column_index(header, "MVC_极大值")
-            if all(i != -1 for i in [subj_idx, file_idx, chan_idx, val_idx]):
-                all_results = [(r[subj_idx], r[file_idx], r[chan_idx], float(r[val_idx]))
-                               for r in data_rows]
+    all_results = []  # 最终结果: (subject, best_file, channel, mvc_value)
 
     # 遍历 data_processed 下所有受试者文件夹
     for subject_dir in sorted(os.listdir(processed_root)):
         subject_path = os.path.join(processed_root, subject_dir)
         if not os.path.isdir(subject_path):
+            # 跳过预测试子目录（但保留 pretest 目录本身是文件夹，需要排除）
             continue
 
-        # 查找该受试者下的"最大收缩测试"文件
+        # 查找该受试者下的所有"最大收缩测试"文件
+        mvc_files = []
         for filename in sorted(os.listdir(subject_path)):
             if "最大收缩" not in filename:
                 continue
-
             file_path = os.path.join(subject_path, filename)
-            if not os.path.isfile(file_path):
-                continue
+            # 跳过子目录（如"预测试"文件夹）
+            if os.path.isfile(file_path):
+                mvc_files.append(filename)
 
-            print(f"=== MVC 文件: {subject_dir} / {filename} ===")
+        if not mvc_files:
+            print(f"=== {subject_dir}: 未找到最大收缩文件，跳过 ===")
+            continue
 
-            header, data_rows = read_csv_file(file_path)
-            if header is None:
-                print(f"  文件为空，跳过")
-                continue
+        print(f"=== 受试者: {subject_dir} (找到 {len(mvc_files)} 个 MVC 文件) ===")
+        for mf in mvc_files:
+            print(f"      - {mf}")
 
-            for col_name in CHANNEL_COLS:
-                key = (subject_dir, col_name)
+        # 对每个通道，遍历所有 MVC 文件，取全局最大值
+        for col_name in CHANNEL_COLS:
+            best_mvc = -1.0
+            best_file = None
 
-                # === 增量处理：已有记录则跳过 ===
-                if key in existing_records:
-                    # 从 all_results 中取已有值输出
-                    for s, fn, ch, val in all_results:
-                        if s == subject_dir and ch == col_name:
-                            print(f"  ⏭ 已存在，跳过: {col_name} (MVC={val:.4f})")
-                            break
+            for mvc_file in mvc_files:
+                file_path = os.path.join(subject_path, mvc_file)
+                header, data_rows = read_csv_file(file_path)
+                if header is None:
+                    print(f"    ⚠ {mvc_file} 为空，跳过")
                     continue
 
                 col_idx = get_column_index(header, col_name)
                 if col_idx == -1:
-                    print(f"  列 {col_name} 不存在，跳过")
+                    print(f"    ⚠ {mvc_file} 缺少列 {col_name}，跳过")
                     continue
 
                 signal = np.array(
@@ -138,12 +126,20 @@ def main():
                 try:
                     mvc_value = extract_mvc_max(signal, fs=1000, window_duration=1.0)
                 except ValueError as e:
-                    print(f"  通道 {col_name} 提取失败: {e}")
+                    print(f"    ⚠ {col_name} 在 {mvc_file} 中提取失败: {e}")
                     continue
 
-                new_results.append((subject_dir, filename, col_name, mvc_value))
-                all_results.append((subject_dir, filename, col_name, mvc_value))
-                print(f"  ✅ {col_name}: MVC = {mvc_value:.4f}")
+                print(f"      {col_name}: {mvc_file} → MVC = {mvc_value:.4f}")
+
+                if mvc_value > best_mvc:
+                    best_mvc = mvc_value
+                    best_file = mvc_file
+
+            if best_mvc > 0:
+                all_results.append((subject_dir, best_file, col_name, best_mvc))
+                print(f"  ✅ {col_name}: MVC = {best_mvc:.4f} (来自 {best_file})")
+            else:
+                print(f"  ❌ {col_name}: 所有文件均无法提取 MVC")
 
     # ========== 输出汇总文件 ==========
     if not all_results:
@@ -161,16 +157,15 @@ def main():
         writer.writerow(output_header)
         writer.writerows(output_rows)
 
-    print(f"\n✅ MVC 提取完成！新增 {len(new_results)} 条，总计 {len(all_results)} 条")
+    print(f"\n✅ MVC 提取完成！共处理 {len(all_results)} 条记录")
     print(f"   结果已保存至: {output_path}")
 
-    # 终端打印本次新增的汇总
-    if new_results:
-        print("\n--- 本次新增 ---")
-        print(f"{'受试者':<16} {'通道_肌肉':<30} {'MVC_极大值':<16}")
-        print("-" * 64)
-        for subject, file_name, col_name, mvc in new_results:
-            print(f"{subject:<16} {col_name:<30} {mvc:<16.4f}")
+    # 终端打印汇总
+    print("\n--- MVC 汇总 ---")
+    print(f"{'受试者':<16} {'来源文件':<36} {'通道_肌肉':<30} {'MVC_极大值':<16}")
+    print("-" * 100)
+    for subject, file_name, col_name, mvc in all_results:
+        print(f"{subject:<16} {file_name:<36} {col_name:<30} {mvc:<16.4f}")
 
 
 if __name__ == "__main__":

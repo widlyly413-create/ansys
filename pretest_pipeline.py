@@ -157,7 +157,9 @@ def compute_percent_mvc_stats(rms_seq, mvc_value):
 def preprocess_pretest_files(subject_dir):
     """
     对指定受试者的预测试文件夹进行预处理。
-    返回: (mvc_file_processed, decor_file_processed) 预处理后的文件路径，或 None
+    返回: (mvc_files_processed, decor_file_processed)
+        mvc_files_processed: 所有"最大收缩"文件的路径列表（可能多个）
+        decor_file_processed: 装饰任务文件路径（一个），或 None
     """
     raw_pretest_path = os.path.join(DATA_RAW_ROOT, subject_dir, PRETEST_DIR)
     if not os.path.isdir(raw_pretest_path):
@@ -166,7 +168,7 @@ def preprocess_pretest_files(subject_dir):
     out_pretest_path = os.path.join(PROCESSED_ROOT, subject_dir, PRETEST_DIR)
     os.makedirs(out_pretest_path, exist_ok=True)
 
-    found_mvc = None
+    found_mvc_list = []  # 可能有多个最大收缩文件
     found_decor = None
 
     for fname in os.listdir(raw_pretest_path):
@@ -227,38 +229,51 @@ def preprocess_pretest_files(subject_dir):
 
         # 分类：最大收缩 vs 装饰
         if "最大收缩" in fname:
-            found_mvc = out_path
+            found_mvc_list.append(out_path)
         elif "装饰" in fname:
             found_decor = out_path
 
-    return found_mvc, found_decor
+    # 返回所有最大收缩文件（可能多个），以及装饰文件
+    return found_mvc_list if found_mvc_list else None, found_decor
 
 
 # ========== 生成验证图表 ==========
 
-def generate_chart(subject_dir, mvc_file, decor_file):
-    """生成预测试验证图表（包含 MVC 值、%MVC 统计、信号预览、合理性检查）"""
+def generate_chart(subject_dir, mvc_file_list, decor_file):
+    """
+    生成预测试验证图表（包含 MVC 值、%MVC 统计、信号预览、合理性检查）
+
+    参数:
+        mvc_file_list: 所有"最大收缩"文件的路径列表（取全局最大值）
+        decor_file: 装饰任务文件路径
+    """
     print(f"  生成验证图表...")
 
-    mvc_header, mvc_data = read_csv_file(mvc_file)
     decor_header, decor_data = read_csv_file(decor_file) if decor_file else (None, None)
-
-    if mvc_header is None:
-        print("  错误：无法读取数据，跳过图表")
-        return None
 
     muscles_short = [c.split("_", 1)[1] for c in CHANNEL_COLS]
 
-    # 提取 MVC 值
+    # 提取 MVC 值：遍历所有 MVC 文件，取每个通道的全局最大值
     mvc_values = {}
+    # 初始化
     for col_name in CHANNEL_COLS:
-        col_idx = get_column_index(mvc_header, col_name)
-        if col_idx == -1:
-            mvc_values[col_name] = None
+        mvc_values[col_name] = None
+
+    for mvc_file in (mvc_file_list or []):
+        mvc_header, mvc_data = read_csv_file(mvc_file)
+        if mvc_header is None:
+            print(f"    ⚠ 无法读取 {mvc_file}，跳过")
             continue
-        signal = extract_column(mvc_data, col_idx)
-        mvc_val = extract_mvc_max(signal, fs=FS)
-        mvc_values[col_name] = mvc_val
+        for col_name in CHANNEL_COLS:
+            col_idx = get_column_index(mvc_header, col_name)
+            if col_idx == -1:
+                continue
+            signal = extract_column(mvc_data, col_idx)
+            mvc_val = extract_mvc_max(signal, fs=FS)
+            if mvc_val is not None:
+                if mvc_values[col_name] is None or mvc_val > mvc_values[col_name]:
+                    mvc_values[col_name] = mvc_val
+                    print(f"    ↑ {col_name}: 新最大值 {mvc_val:.4f} (来自 {os.path.basename(mvc_file)})")
 
     # 提取装饰任务的 %MVC 统计值
     pct_stats = {}
@@ -537,8 +552,8 @@ def main():
         print(f"{'='*60}")
 
         # 1. 预处理预测试文件
-        mvc_file, decor_file = preprocess_pretest_files(subject_dir)
-        if mvc_file is None:
+        mvc_files, decor_file = preprocess_pretest_files(subject_dir)
+        if mvc_files is None or len(mvc_files) == 0:
             print(f"  ⚠ 未找到预测试目录或最大收缩文件，跳过")
             print(f"  请在 data_raw/{subject_dir}/预测试/ 下放置预测试文件")
             continue
@@ -550,16 +565,21 @@ def main():
 
         processed_any = True
 
-        # 2. 提取 MVC 值
-        mvc_header, mvc_data = read_csv_file(mvc_file)
+        # 2. 提取 MVC 值（取多个最大收缩文件的全局最大值）
         mvc_values = {}
-        for col_name in CHANNEL_COLS:
-            col_idx = get_column_index(mvc_header, col_name)
-            if col_idx == -1:
+        for mvc_file in mvc_files:
+            mvc_header, mvc_data = read_csv_file(mvc_file)
+            if mvc_header is None:
                 continue
-            signal = extract_column(mvc_data, col_idx)
-            mvc_val = extract_mvc_max(signal, fs=FS)
-            mvc_values[col_name] = mvc_val
+            for col_name in CHANNEL_COLS:
+                col_idx = get_column_index(mvc_header, col_name)
+                if col_idx == -1:
+                    continue
+                signal = extract_column(mvc_data, col_idx)
+                mvc_val = extract_mvc_max(signal, fs=FS)
+                if mvc_val is not None:
+                    if col_name not in mvc_values or mvc_val > mvc_values[col_name]:
+                        mvc_values[col_name] = mvc_val
 
         # 3. 计算装饰任务的 %MVC 统计
         pct_stats = {}
@@ -584,8 +604,8 @@ def main():
                 mean_val, p10, p50, p90 = compute_percent_mvc_stats(rms_seq, mvc_val)
                 pct_stats[col_name] = {"Mean": mean_val, "P10": p10, "P50": p50, "P90": p90}
 
-        # 4. 生成验证图表（含合理性检查）
-        chart_path = generate_chart(subject_dir, mvc_file, decor_file)
+        # 4. 生成验证图表（含合理性检查，多文件取最大值）
+        chart_path = generate_chart(subject_dir, mvc_files, decor_file)
 
         # 5. 打印摘要
         print_summary(subject_dir, mvc_values, pct_stats, chart_path)
